@@ -80,7 +80,7 @@ catch {
 
 # === Initialization and Connection ===
 function Initialize-EntraPrerequisites {
-    $requiredPSVersion = [Version]"5.1"
+    $requiredPSVersion = [Version]"7.0"
     $requiredModules = @(
         "Microsoft.Graph.Users",
         "Microsoft.Graph.Applications",
