@@ -1,71 +1,130 @@
-Get-EntraHumanIdentity.ps1
+# 🧠 IDENTITY Scripts
 
-PowerShell script designed to generate detailed and customizable reports on your Entra ID (formerly Azure Active Directory) environment. This tool connects to Microsoft Graph, retrieves critical user, application, and service principal data, and presents it in a clear, accessible format.
+This repository contains two PowerShell scripts designed to audit human identities across hybrid environments—on-premises Active Directory and Microsoft Entra ID (formerly Azure AD). These tools generate detailed reports to help IT administrators assess identity hygiene, activity, and ownership.
 
-Key Features 🛠️
-This script is a reporting solution with the following capabilities:
+---
 
-Flexible Reporting Modes: Choose between a Full report, which details every user, or a Summary report, which aggregates data by domain for a high-level overview.
+## 📄 Scripts Overview
 
-Users Reporting: Automatically categorizes users as Active, Inactive, or Never Logged In based on a configurable inactivity period.
+### 1. `Get-AdHumanIdentity.ps1`
 
-Service Account Identification: Identify service accounts by providing common naming patterns, helping you quickly filter out administrative accounts from user-facing reports.
+**Purpose:**  
+Audits users and service accounts across one or more Active Directory domains, generating per-OU or domain-level summaries.
 
-Ownership Analysis: When enabled, the script performs a deep dive to count the number of applications and service principals owned by each user
+**Key Features:**
+- Classifies accounts by activity: active, inactive, never logged in
+- Detects Managed Service Accounts (MSA) and Group Managed Service Accounts (gMSA)
+- Flags accounts with `PasswordNeverExpires`
+- Identifies service accounts using wildcard name patterns
+- Supports per-OU or domain summary reporting
+- Outputs timestamped CSV reports
 
-Self-Contained HTML Reports: Generates single-file HTML reports
+**Usage Examples:**
+```powershell
+# Audit all domains with default settings
+.\Get-AdHumanIdentity.ps1 -Mode UserPerOU
 
-Logging: All actions and potential errors are logged to a dedicated file
+# Audit specific domain with service account pattern matching
+.\Get-AdHumanIdentity.ps1 -SpecificDomains "corp.domain.local" `
+                          -UserServiceAccountNamesLike "*svc*", "*_bot" `
+                          -Mode Summary
 
-Prerequisites
-This script requires a modern version of PowerShell (v5.1 or newer) and an internet connection to install the necessary Microsoft Graph modules on first run if needed
+Parameters:
 
-Installation & Usage
-Simply download the .ps1 file to your machine. The script will automatically check for and install the required PowerShell modules when you run it for the first time:
-        "Microsoft.Graph.Users",
-        "Microsoft.Graph.Applications",
-        "Microsoft.Graph.Identity.DirectoryManagement"
+Parameter	Description
+-SpecificDomains	Array of domain names to audit (optional)
+-UserServiceAccountNamesLike	Wildcard patterns to identify service accounts (optional)
+-Mode	Required. UserPerOU or Summary
+Requirements:
 
-Example 1: Full Report with Ownership Check
-This command generates a full report for all users, including the time-consuming ownership check for applications and service principals. It also identifies service accounts that have "svc-" or "sa-" in their User Principal Name (UPN).
+PowerShell 5.1+
 
-PowerShell
+RSAT: Active Directory module installed
 
-.\Get-EntraHumanIdentity.ps1 -Mode Full -DaysInactive 180 -UserServiceAccountNamesLike "svc-", "sa-" -CheckOwnership
-Example 2: Summary Report Only
-This command runs the script in Summary mode, which is faster as it only generates the aggregated domain report.
+Domain-joined machine or network access to AD
 
-PowerShell
+2. Get-EntraHumanIdentity.ps1
+Purpose: Generates detailed reports on users, applications, and service principals in Microsoft Entra ID using Microsoft Graph.
 
+Key Features:
+
+Connects to Microsoft Graph with required scopes
+
+Retrieves user metadata, sign-in activity, sync status, and ownership
+
+Flags inactive users, guest accounts, and service account patterns
+
+Optional ownership analysis of apps and service principals
+
+Supports Full (per-user detail) and Summary (aggregated by domain) modes
+
+Outputs CSV and HTML reports with logging
+
+Usage Examples:
+# Full report with ownership analysis
+.\Get-EntraHumanIdentity.ps1 -Mode Full `
+                             -DaysInactive 180 `
+                             -UserServiceAccountNamesLike "svc-", "sa-" `
+                             -CheckOwnership
+
+# Summary report only
 .\Get-EntraHumanIdentity.ps1 -Mode Summary
-Example 3: Full Report without Ownership
-This command runs the script in Full mode, focusing on user activity and identifying service accounts without performing the detailed ownership analysis.
 
-PowerShell
+Parameters:
 
-.\Get-EntraHumanIdentity.ps1 -Mode Full -DaysInactive 90 -UserServiceAccountNamesLike "svc-", "sa-"
-Parameters
-Parameter	Type	Default	Description
-UserServiceAccountNamesLike	string[]	None	An array of strings used to identify service accounts by matching patterns in their UPN.
-Mode	string	"Full"	Specifies the report type. Options are "Full" or "Summary".
-DaysInactive	int	180	The number of days of inactivity to check for when identifying inactive users.
-CheckOwnership	switch	None	When present, the script performs additional, more time-consuming calls to count the number of applications and service principals owned by each user.
+Parameter	Description
+-Mode	Full (default) or Summary
+-DaysInactive	Threshold in days to flag inactive users (default: 180)
+-UserServiceAccountNamesLike	Array of patterns to identify service accounts (optional)
+-CheckOwnership	Switch to enable ownership analysis (optional)
+Requirements:
 
-Exporter vers Sheets
-Output
-The script creates a dedicated folder named EntraReports in the same directory it's executed from. Inside, you will find:
+PowerShell 7+
 
-CSV Files: Detailed CSV files for each report, which can be easily imported into Excel or other data analysis tools.
+Microsoft Graph PowerShell SDK modules:
 
-HTML Files: A single-file HTML report ready for sharing or archival.
+Microsoft.Graph.Users
 
-Log File: An audit log of the script's execution, named EntraAudit_YYYYMMDD_HHMMSS.log, for easy troubleshooting.
+Microsoft.Graph.Applications
 
-Customization
-The HTML report's appearance can be customized by editing the CSS styles or replacing the Base64-encoded SVG logo data directly within the Export-HtmlReport function.
+Microsoft.Graph.Identity.DirectoryManagement
 
-License
-This project is licensed under the MIT License.
+Admin permissions to query Entra ID
 
-Author
-Aymeric Jaouen
+📁 Output Structure
+ADReports/: Contains Active Directory audit reports
+
+EntraReports/: Contains Entra ID reports
+
+File names include timestamps for traceability
+
+Reports are saved in both CSV and HTML formats
+
+Logs are generated alongside reports for auditing
+
+🛠️ Setup Instructions
+Clone the repository:
+
+bash
+git clone https://github.com/AymericJaouen/IDENTITY.git
+cd IDENTITY
+Install required modules:
+
+powershell
+# For AD script
+Import-Module ActiveDirectory
+
+# For Entra script
+Install-Module Microsoft.Graph -Scope CurrentUser
+Run the desired script with appropriate parameters.
+
+📄 License
+This project is licensed under the MIT License. See the LICENSE file for details.
+
+🙋‍♂️ Author
+Aymeric Jaouen For questions, feedback, or contributions, please use GitHub Issues.
+
+
+---
+
+Let me know if you'd like badges, diagrams, or a scheduling guide for automation. I can also help you generate sample reports or test data if needed.
