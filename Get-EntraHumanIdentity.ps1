@@ -658,7 +658,6 @@ function Export-HtmlReport {
     h2 {
         color: #0d47a1;
         font-size: 20px;
-        border-bottom: 2px solid #e0e0e0;
         padding-bottom: 10px;
         margin-top: 30px;
     }
@@ -797,14 +796,13 @@ if ($Mode -eq 'Full') {
 
     Export-CsvReport -FileName "Full_ByUser_$timestamp.csv"    -Data  $byUser   -Columns $userCols
     Export-CsvReport -FileName "Full_ByDomain_$timestamp.csv"  -Data  $byDomain -Columns $domainCols
-    #Export-HtmlReport -FileName "Full_Report_$timestamp.html"   -Title 'Full EntraID Report' -Data  $byUser   -Columns $userCols
     Export-HtmlReport -FileName "Full_Report_$timestamp.html" `
-                   -Title 'User Details' `
-                   -Data  $byUser `
-                   -Columns $userCols `
-                   -SecondReportTitle 'Domain Summary' `
-                   -SecondReportData $byDomain `
-                   -SecondReportColumns $domainCols `
+                   -Title 'Domain Summary' `
+                   -Data  $byDomain `
+                   -Columns $domainCols `
+                   -SecondReportTitle 'User Details' `
+                   -SecondReportData $byUser `
+                   -SecondReportColumns $userCols `
                    -OutputPath $OutputPath
 }
 

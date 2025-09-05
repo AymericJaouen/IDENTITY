@@ -1,7 +1,7 @@
 <#
 .SYNOPSIS
     Audits Active Directory users and service accounts across one or more domains,
-    with per-OU or domain-level summaries and CSV/HTML export.
+    with per-OU, domain-level, or detailed per-user summaries and CSV/HTML export.
 
 .DESCRIPTION
     This script connects to one or more Active Directory domains and retrieves a unified view
@@ -15,7 +15,7 @@
     You can:
         - Target specific domains or scan the full forest
         - Provide wildcard-based name patterns to flag service accounts
-        - Choose per-OU or summary reporting view
+        - Choose per-OU, summary, or detailed per-user reporting view
         - Automatically export results to a timestamped CSV and HTML report
 
 .PARAMETER SpecificDomains
@@ -28,26 +28,27 @@
 
 .PARAMETER Mode
     Required. Selects output format:
-        - 'UserPerOU': detailed counts per Organizational Unit (OU)
+        - 'Full': detailed counts per Organizational Unit (OU)
         - 'Summary': consolidated view per domain
+        - 'Detailed': a flat list of every user with their properties
 
 .EXAMPLE
-    .\Get-AdAudit.ps1 -SpecificDomains "corp.domain.local" -UserServiceAccountNamesLike "*svc*","*_bot" -Mode UserPerOU
+    .\Get-AdAudit.ps1 -SpecificDomains "corp.domain.local" -UserServiceAccountNamesLike "*svc*","*_bot" -Mode Full
 
     This command:
         - Targets only corp.domain.local
         - Scans for accounts whose Name matches "*svc*" or "*_bot"
         - Classifies and counts users by OU
-        - Outputs results to .\ADReports\ADAudit_UserPerOU_<timestamp>.csv and HTML report
+        - Outputs results to .\ADReports\ADAudit_Full_<timestamp>.csv and HTML report
 
 .EXAMPLE
-    .\Get-AdAudit.ps1 -Mode Summary
+    .\Get-AdAudit.ps1 -Mode Detailed
 
     This command:
         - Targets all domains in the forest
         - Skips name-based pattern matching
-        - Summarizes and counts users by domain
-        - Outputs results to .\ADReports\ADAudit_Summary_<timestamp>.csv and HTML report
+        - Outputs a detailed list of every account found in the forest
+        - Outputs results to .\ADReports\ADAudit_Detailed_<timestamp>.csv and HTML report
 
 .NOTES
     Script Requirements:
@@ -60,8 +61,8 @@
 param (
     [string[]]$UserServiceAccountNamesLike = @(),
     [string[]]$SpecificDomains,
-    [ValidateSet("UserPerOU", "Summary")]
-    [string]$Mode = "UserPerOU"
+    [ValidateSet("Full", "Summary", "Detailed")]
+    [string]$Mode = "Full"
 )
 
 # === Logging Setup ===
@@ -79,6 +80,32 @@ function Write-Log {
     $formatted = "[{0}] [{1}] {2}" -f (Get-Date -Format "yyyy-MM-dd HH:mm:ss"), $Level, $Message
     Add-Content -Path $logPath -Value $formatted
     Write-Host $Message -ForegroundColor $Color
+}
+
+# === Log the command that started the script ===
+try {
+    $commandString = $MyInvocation.MyCommand.Name
+    foreach ($param in $MyInvocation.BoundParameters.GetEnumerator()) {
+        $paramName = $param.Key
+        $paramValue = $param.Value
+
+        $formattedValue = ""
+        if ($paramValue -is [System.Array]) {
+            # Format array parameters like "val1", "val2"
+            $formattedValue = '"' + ($paramValue -join '", "') + '"'
+        } elseif ($paramValue -is [string] -and $paramValue.Contains(" ")) {
+            # Quote strings with spaces
+            $formattedValue = """$paramValue"""
+        } else {
+            # Simple strings, numbers, booleans
+            $formattedValue = $paramValue.ToString()
+        }
+        $commandString += " -$paramName $formattedValue"
+    }
+    Write-Log "Script started with command: $commandString" "INFO" "Magenta"
+}
+catch {
+    Write-Log "Could not log the command line. Error: $_" "WARNING" "Yellow"
 }
 
 function Initialize-Prerequisites {
@@ -106,7 +133,7 @@ function Initialize-Prerequisites {
     [System.Threading.Thread]::CurrentThread.CurrentCulture = 'en-US'
     [System.Threading.Thread]::CurrentThread.CurrentUICulture = 'en-US'
 
-    Write-Log "Prerequisites validated. Environment initialized." -Color "Green"
+    Write-Log "Successfully validated prerequisites. Environment initialized." -level "INFO" -Color "Green"
 }
 
 Initialize-Prerequisites
@@ -170,9 +197,8 @@ function Get-UsersAsServiceAccount {
 }
 
 #————————————————————————————————————————
-# 1. DATA COLLECTION & AGGREGATION
+# 1. DATA COLLECTION (NO AGGREGATION)
 #————————————————————————————————————————
-
 function Get-ADUserData {
     [CmdletBinding()]
     param(
@@ -183,8 +209,8 @@ function Get-ADUserData {
     )
 
     begin {
-        Write-Log "Initializing data collection..." -Color Green
-        $summary = [System.Collections.Generic.List[PSCustomObject]]::new()
+        Write-Log "Initializing data collection..." -level "INFO" -Color Cyan
+        $allUserData = [System.Collections.Generic.List[PSCustomObject]]::new()
         $logonThreshold = (Get-Date).AddDays(-180)
     }
 
@@ -193,67 +219,59 @@ function Get-ADUserData {
             Write-Log "Auditing domain: $domain" -Color Cyan
 
             try {
-                # Preload reference data for the domain
-                $msaSet = @(Get-ADServiceAccount -Server $domain -Filter { ObjectClass -eq 'msDS-ManagedServiceAccount' } | Select-Object -ExpandProperty SamAccountName -ErrorAction SilentlyContinue)
-                $gmsaSet = @(Get-ADServiceAccount -Server $domain -Filter { ObjectClass -eq 'msDS-GroupManagedServiceAccount' } | Select-Object -ExpandProperty SamAccountName -ErrorAction SilentlyContinue)
-                $noExpireSet = @(Get-ADUser -Server $domain -Filter { PasswordNeverExpires -eq $true -and Enabled -eq $true } | Select-Object -ExpandProperty SamAccountName -ErrorAction SilentlyContinue)
-                $patternSet = @(Get-UsersAsServiceAccount -NamePatterns $ServicePattern -Domain $domain | Select-Object -ExpandProperty SamAccountName)
+                # Get all user-like objects (users, MSAs, and gMSAs) in one go
+                $users = Get-ADObject -Server $domain -Filter "ObjectClass -eq 'user' -or ObjectClass -eq 'msDS-ManagedServiceAccount' -or ObjectClass -eq 'msDS-GroupManagedServiceAccount'" `
+                    -Properties SamAccountName, DistinguishedName, LastLogonTimestamp, Enabled, PasswordNeverExpires, ObjectClass -ErrorAction Stop
                 
-                # Get all user and service account objects
-                $userAccounts = Get-ADUser -Server $domain -Filter * -Properties SamAccountName, DistinguishedName, LastLogonTimestamp, Enabled, PasswordNeverExpires -ErrorAction Stop
-                $msaObjects = @(Get-ADServiceAccount -Server $domain -Filter { ObjectClass -eq 'msDS-ManagedServiceAccount' })
-                $gmsaObjects = @(Get-ADServiceAccount -Server $domain -Filter { ObjectClass -eq 'msDS-GroupManagedServiceAccount' })
-                
-                # Combine all objects into a single collection
-                $users = $userAccounts + $msaObjects + $gmsaObjects
-                
+                # Build a lookup table for pattern matches
+                $patternMatchedSet = @()
+                if ($ServicePattern.Count -gt 0) {
+                    $patternMatchedSet = @($users | Where-Object { $ServicePattern | Where-Object { $_.SamAccountName -like $_ } } | Select-Object -ExpandProperty SamAccountName)
+                }
+
+                # Process the unique list of objects
                 foreach ($user in $users) {
                     $sam = $user.SamAccountName
                     $ou  = Get-OUFromDN $user.DistinguishedName
-
-                    $entry = $summary | Where-Object { $_.Domain -eq $domain -and $_.OU -eq $ou } | Select-Object -First 1
-                    if (-not $entry) {
-                        $entry = [PSCustomObject]@{
-                            Domain                              = $domain
-                            OU                                  = $ou
-                            TotalUsers                          = 0
-                            ActiveUsers                         = 0
-                            InactiveUsers                       = 0
-                            NeverLoggedInUsers                  = 0
-                            ServiceAccountsManaged              = 0
-                            ServiceAccountsGroupManaged         = 0
-                            ServiceAccountsPasswordNeverExpires = 0
-                            ServiceAccountsPatternMatched       = 0
-                        }
-                        $summary.Add($entry)
-                    }
-
-                    $entry.TotalUsers++
                     
-                    if ($user.LastLogonTimestamp) {
-                        if ([DateTime]::FromFileTime($user.LastLogonTimestamp) -ge $logonThreshold) {
-                            $entry.ActiveUsers++
-                        } else {
-                            $entry.InactiveUsers++
+                    # Correctly handle LastLogonTimestamp
+                    $lastLogonTimestampValue = if ($user.LastLogonTimestamp) { $user.LastLogonTimestamp } else { 0 }
+                    $lastLogonDate = [DateTime]::FromFileTime($lastLogonTimestampValue)
+
+                    # Safely get PasswordNeverExpires for user objects only
+                    $passwordNeverExpiresValue = 0
+                    try {
+                        if ($user.ObjectClass -eq 'user') {
+                            $passwordNeverExpiresValue = [int]$user.PasswordNeverExpires
                         }
-                    } else {
-                        $entry.NeverLoggedInUsers++
+                    } catch {
+                        # Ignore the error if the property is not found
                     }
 
-                    if (Test-ManagedServiceAccount $sam $msaSet) { $entry.ServiceAccountsManaged++ }
-                    if (Test-GroupManagedServiceAccount $sam $gmsaSet) { $entry.ServiceAccountsGroupManaged++ }
-                    if (Test-NonExpiringUser $sam $noExpireSet) { $entry.ServiceAccountsPasswordNeverExpires++ }
-                    if (Test-PatternMatchedUser $sam $patternSet) { $entry.ServiceAccountsPatternMatched++ }
+                    # Add the formatted user data to the list
+                    $allUserData.Add([PSCustomObject]@{
+                        Domain = $domain
+                        SamAccountName = $sam
+                        DistinguishedName = $user.DistinguishedName
+                        OU = $ou
+                        LastLogonDate = $lastLogonDate
+                        LastLogonTimestamp = $lastLogonTimestampValue
+                        Enabled = [int]$user.Enabled
+                        MSA = if ($user.ObjectClass -eq 'msDS-ManagedServiceAccount') { 1 } else { 0 }
+                        GMSA = if ($user.ObjectClass -eq 'msDS-GroupManagedServiceAccount') { 1 } else { 0 }
+                        PasswordNeverExpires = $passwordNeverExpiresValue
+                        PatternMatched = if ($patternMatchedSet -contains $sam) { 1 } else { 0 }
+                    })
                 }
             } catch {
-                Write-Log "Failed to process domain $($domain): $_" -Level "ERROR" -Color Red
+                Write-Log "Failed to process domain $($domain): $_" -Level "ERROR" -Color RED
             }
         }
     }
 
     end {
-        Write-Log "Finished data collection. Found $($summary.Count) summary records." -Color Green
-        return $summary
+        Write-Log "Finished data collection. Found $($allUserData.Count) user records." -level "INFO" -Color Green
+        return $allUserData
     }
 }
 
@@ -263,12 +281,11 @@ function Get-ADUserData {
 function Get-ReportHeaders {
     param(
         [Parameter(Mandatory)]
-        [ValidateSet("UserPerOU", "Summary")]
+        [ValidateSet("Full", "Summary", "Detailed")]
         [string] $Mode
     )
-
     switch ($Mode) {
-        'UserPerOU' {
+        'Full' {
             return [PSCustomObject]@{
                 Domain = 'Domain'
                 OU = 'Organizational Unit'
@@ -293,6 +310,20 @@ function Get-ReportHeaders {
                 ServiceAccountsGroupManaged = 'Group Managed Service Accounts (gMSA)'
                 ServiceAccountsPasswordNeverExpires = 'Password Never Expires'
                 ServiceAccountsPatternMatched = 'Service Account Pattern Matched'
+            }
+        }
+        'Detailed' {
+             return [PSCustomObject]@{
+                Domain = 'Domain'
+                SamAccountName = 'SAM ACCOUNTNAME'
+                OU = 'Organizational Unit'
+                Active = 'Active'
+                Inactive = 'Inactive'
+                NeverLoggedIn = 'Never Logged In'
+                MSA = 'Is MSA'
+                GMSA = 'Is GMSA'
+                PasswordNeverExpires = 'Password Never Expires'
+                PatternMatched = 'Is Pattern Matched'
             }
         }
     }
@@ -325,7 +356,7 @@ function Export-CsvReport {
         Write-Log "Successfully exported CSV report to $fullPath." "INFO" "Green"
     }
     catch {
-        Write-Log "Could not export CSV report to $fullPath. Error: $_" "ERROR" "RED"
+        Write-Log "Could not export CSV report to $fullPath. Error: $_" "ERROR" -Color "RED"
     }
 }
 
@@ -381,7 +412,7 @@ function Export-HtmlReport {
             return $html
         }
 
-        $logoHtml = "<img src='data:image/svg+xml;base64,PGRpdiBjbGFzcz0ndGFibGUtZ2VuZXJhdG9yLWxvZ28nPgo8c3ZnIHhtbG5zPSdodHRwOi8vd3d3LnczLm9yZy8yMDAwL3N2ZycgaGVpZ2h0PSI3MiIgd2lkdGg9IjcyIiB2aWV3Qm94PSItOCAtMzUwMDAgMjc4MDUwIDQwMzMzNCIgc2hhcGUtcmVuZGVyaW5nPSJnZW9tZXRyaWNQcmVjaXNpb24iIHRleHQtcmVuZGVyaW5nPSJnZW9tZXRyaWNQcmVjaXNpb24iIGltYWdlLXJlbmRlcmluZz0ib3B0aW1pemVRdWFsaXR5IiBmaWxsLXJ1bGU9ImV2ZW5vZGQiIGNsaXAtcnVsZT0iZXZlbm9kZCI+CiAgPGc+CiAgICA8cGF0aCBmaWxsPSIjZWEzZTIzIiBkPSJNMjYyNTcwIDMxOTUxNmwtMjkgLTE2VjE2OTYyOEwyNjE0NTEgNTM5MjkgMTI3NzM1IDAgMTI3NzE0IDIxTDI4NDg2IDc3MDExIDEwMDA5OSA1NDU3MFYxODU3NTFMMTM1MDkgMjY2NDY1bDE5MDc0OSAxMjQ2NTMgMTMzOTUgMjYxMjVMMjA1MzYyIDI3NTgxOVYxMjczODZMMjQzNjkzIDI1MDYyNiAyNDM3MDkgMjUzOTM5IDMxMjc0MiAyOTk5MTEgMzEyNzU4IDMwMDU0OSAzMTE0NDUgMzM1NjE2IDI0Mzg3NCAzNjUwNDQgMjQ0MDk1IDQ1NDM2NSAyOTQ5MzkgNDU0Mzc0IDM5NDI3NSAzNTY3NjggMzg2NzQyIDMzOTczMyAyNjY3OTUgMzM4ODQ2IDI2NzM0MSAxMjkzNzQgMzUyODczVjM1MzE0OSAzNTA2MjQgMzA1NzA5bC0zMTI3MzYgOTc2NDNMMjczODcgMzk4MzEzdi0yMDc4MDZMMjAwNTI0IDEwOTg4NCAtMTE4NTkgMTQ5MDE5LTEyNzc3NSAtMTMyNzUyIDQzNzM4IDIxNDAzMSAxNDQ2MzcgMjAzNjM0IDIyNTcxNyAyNzY4NTdWMjk3NTMyeiIvPgogIDwvZz4KPC9zdmc+CgocL2Rpdj4K" class='header-svg' alt='Rubrik Logo' />"
+        $logoHtml = "<img src='data:image/svg+xml;base64,PGRpdiBjbGFz"
         $css = @"
 <style>
     body { font-family: Arial, sans-serif; background-color: #f0f2f5; color: #333; margin: 0; padding: 0; }
@@ -432,7 +463,7 @@ function Export-HtmlReport {
         Write-Log "Successfully exported HTML report to $fullPath" "INFO" "Green"
     }
     catch {
-        Write-Log "Could not export to HTML file $fullPath. Error: $_" "ERROR" "RED"
+        Write-Log "Could not export to HTML file $fullPath. Error: $_" "ERROR" -Color "RED"
     }
 }
 
@@ -440,14 +471,38 @@ function Export-HtmlReport {
 # Main Logic
 # =====================
 
+$logonThreshold = (Get-Date).AddDays(-180)
 $domainsToAudit = if ($SpecificDomains) {
     $SpecificDomains
 } else {
     [System.DirectoryServices.ActiveDirectory.Forest]::GetCurrentForest().Domains | ForEach-Object { $_.Name }
 }
 
-# The Get-ADUserData function now returns the fully aggregated summary object
-$summary = Get-ADUserData -DomainsToAudit $domainsToAudit -ServicePattern $UserServiceAccountNamesLike
+# 1. Collect all user data as a flat list
+Write-Log "Collecting User Data..." -Color "Cyan"
+$allUserData = Get-ADUserData -DomainsToAudit $domainsToAudit -ServicePattern $UserServiceAccountNamesLike
+
+# 2. Aggregate the data for reporting purposes
+$summary = $allUserData | Group-Object -Property Domain, OU | ForEach-Object {
+    $group = $_.Group
+    $ouName = if ($_.Name.Split(',').Count -gt 1) { $_.Name.Split(',')[1].Trim() } else { "Unknown" }
+    
+    # Define a special date for users who have never logged in
+    $neverLoggedInDate = [DateTime]::FromFileTime(0)
+
+    [PSCustomObject]@{
+        Domain = $_.Name.Split(',')[0].Trim()
+        OU = $ouName
+        TotalUsers = $group.Count
+        ActiveUsers = ($group | Where-Object { $_.Enabled -eq 1 -and $_.LastLogonDate -ge $logonThreshold -and $_.LastLogonDate -ne $neverLoggedInDate }).Count
+        InactiveUsers = ($group | Where-Object { $_.Enabled -eq 1 -and $_.LastLogonDate -lt $logonThreshold -and $_.LastLogonDate -ne $neverLoggedInDate }).Count
+        NeverLoggedInUsers = ($group | Where-Object { $_.Enabled -eq 1 -and $_.LastLogonDate -eq $neverLoggedInDate }).Count
+        ServiceAccountsManaged = ($group | Where-Object { $_.MSA -eq 1 }).Count
+        ServiceAccountsGroupManaged = ($group | Where-Object { $_.GMSA -eq 1 }).Count
+        ServiceAccountsPasswordNeverExpires = ($group | Where-Object { $_.PasswordNeverExpires -eq 1 }).Count
+        ServiceAccountsPatternMatched = ($group | Where-Object { $_.PatternMatched -eq 1 }).Count
+    }
+}
 
 # Generate reports based on mode
 $reportColumns = Get-ReportHeaders -Mode $Mode
@@ -455,10 +510,26 @@ $csvFileName = "ADAudit_${Mode}_$timestamp.csv"
 $htmlFileName = "ADAudit_${Mode}_$timestamp.html"
 
 switch ($Mode) {
-    "UserPerOU" {
-        Write-Log "Generating OU Summary Report..." -Color "Green"
+    "Full" {
+        Write-Log "Generating Full Report..." -level "INFO" -Color "Cyan"
         $reportData = $summary | Sort-Object Domain, OU
-        $reportData | Format-Table -AutoSize # For console output
+        
+        # Add total row
+        $totalRow = [PSCustomObject]@{
+            Domain = 'TOTAL'
+            OU = ''
+            TotalUsers = ($reportData | Measure-Object TotalUsers -Sum).Sum
+            ActiveUsers = ($reportData | Measure-Object ActiveUsers -Sum).Sum
+            InactiveUsers = ($reportData | Measure-Object InactiveUsers -Sum).Sum
+            NeverLoggedInUsers = ($reportData | Measure-Object NeverLoggedInUsers -Sum).Sum
+            ServiceAccountsManaged = ($reportData | Measure-Object ServiceAccountsManaged -Sum).Sum
+            ServiceAccountsGroupManaged = ($reportData | Measure-Object ServiceAccountsGroupManaged -Sum).Sum
+            ServiceAccountsPasswordNeverExpires = ($reportData | Measure-Object ServiceAccountsPasswordNeverExpires -Sum).Sum
+            ServiceAccountsPatternMatched = ($reportData | Measure-Object ServiceAccountsPatternMatched -Sum).Sum
+        }
+        $reportData += $totalRow
+        
+        #$reportData | Format-Table -AutoSize # For console output
         Export-CsvReport -FileName $csvFileName -Data $reportData -Columns $reportColumns -OutputPath $outputPath
         Export-HtmlReport -FileName $htmlFileName -Title 'Active Directory Audit: User Per OU' -Data $reportData -Columns $reportColumns -OutputPath $outputPath
     }
@@ -478,17 +549,87 @@ switch ($Mode) {
                     ServiceAccountsPatternMatched = ($_.Group | Measure-Object ServiceAccountsPatternMatched -Sum).Sum
                 }
             }
-        
-        Write-Log "Generating Domain Summary Report..." -Color "Green"
-        $reportData = $summaryGrouped | Sort-Object Domain
-        $reportData | Format-Table -AutoSize # For console output
+
+        # Force the output to be an array before adding the total row
+        $reportData = @($summaryGrouped | Sort-Object Domain)
+
+        # Add total row to the end of the sorted data
+        $totalRow = [PSCustomObject]@{
+            Domain = 'TOTAL'
+            TotalUsers = ($reportData | Measure-Object TotalUsers -Sum).Sum
+            ActiveUsers = ($reportData | Measure-Object ActiveUsers -Sum).Sum
+            InactiveUsers = ($reportData | Measure-Object InactiveUsers -Sum).Sum
+            NeverLoggedInUsers = ($reportData | Measure-Object NeverLoggedInUsers -Sum).Sum
+            ServiceAccountsManaged = ($reportData | Measure-Object ServiceAccountsManaged -Sum).Sum
+            ServiceAccountsGroupManaged = ($reportData | Measure-Object ServiceAccountsGroupManaged -Sum).Sum
+            ServiceAccountsPasswordNeverExpires = ($reportData | Measure-Object ServiceAccountsPasswordNeverExpires -Sum).Sum
+            ServiceAccountsPatternMatched = ($reportData | Measure-Object ServiceAccountsPatternMatched -Sum).Sum
+        }
+        $reportData += $totalRow
+
+        Write-Log "Generating Domain Summary Report..." -level "INFO" -Color "Cyan"
+        #$reportData | Format-Table -AutoSize # For console output
         Export-CsvReport -FileName $csvFileName -Data $reportData -Columns $reportColumns -OutputPath $outputPath
         Export-HtmlReport -FileName $htmlFileName -Title 'Active Directory Audit: Domain Summary' -Data $reportData -Columns $reportColumns -OutputPath $outputPath
     }
+"Detailed" {
+    Write-Log "Generating Detailed Per-User Report..." -level "INFO" -Color "Cyan"
+    $neverLoggedInDate = [DateTime]::FromFileTime(0)
+    $reportData = $allUserData | Select-Object `
+        Domain, `
+        SamAccountName, `
+        OU, `
+        @{
+            Name = "Active"
+            Expression = { if ($_.Enabled -eq 1 -and $_.LastLogonDate -ge $logonThreshold -and $_.LastLogonDate -ne $neverLoggedInDate) { 1 } else { 0 } }
+        }, `
+        @{
+            Name = "Inactive"
+            Expression = { if ($_.Enabled -eq 1 -and $_.LastLogonDate -lt $logonThreshold -and $_.LastLogonDate -ne $neverLoggedInDate) { 1 } else { 0 } }
+        }, `
+        @{
+            Name = "NeverLoggedIn"
+            Expression = { if ($_.Enabled -eq 1 -and $_.LastLogonDate -eq $neverLoggedInDate) { 1 } else { 0 } }
+        }, `
+        @{
+            Name = "MSA"
+            Expression = { if ($_.MSA -eq 1) { 1 } else { 0 } }
+        }, `
+        @{
+            Name = "GMSA"
+            Expression = { if ($_.GMSA -eq 1) { 1 } else { 0 } }
+        }, `
+        @{
+            Name = "PasswordNeverExpires"
+            Expression = { if ($_.PasswordNeverExpires -eq 1) { 1 } else { 0 } }
+        }, `
+        @{
+            Name = "PatternMatched"
+            Expression = { if ($_.PatternMatched -eq 1) { 1 } else { 0 } }
+        } | Sort-Object Domain, OU, SamAccountName
+
+        # Add total row
+        $totalRow = [PSCustomObject]@{
+            Domain = 'TOTAL'
+            SamAccountName = ''
+            OU = ''
+            Active = ($reportData | Measure-Object Active -Sum).Sum
+            Inactive = ($reportData | Measure-Object Inactive -Sum).Sum
+            NeverLoggedIn = ($reportData | Measure-Object NeverLoggedIn -Sum).Sum
+            MSA = ($reportData | Measure-Object MSA -Sum).Sum
+            GMSA = ($reportData | Measure-Object GMSA -Sum).Sum
+            PasswordNeverExpires = ($reportData | Measure-Object PasswordNeverExpires -Sum).Sum
+            PatternMatched = ($reportData | Measure-Object PatternMatched -Sum).Sum
+        }
+        $reportData += $totalRow
+
+        #$reportData | Format-Table -AutoSize # For console output
+        Export-CsvReport -FileName $csvFileName -Data $reportData -Columns $reportColumns -OutputPath $outputPath
+        Export-HtmlReport -FileName $htmlFileName -Title 'Active Directory Audit: Detailed Per-User List' -Data $reportData -Columns $reportColumns -OutputPath $outputPath
+    }
 }
 
-Write-Log "AD reports generation completed. Results saved to $outputPath." -Color "Green"
-Write-Log "Please send all the files within the directory to your Rubrik Sales representative." -Color "Green"
+Write-Log "Successfully generated AD reports. Results saved to $outputPath." -level "INFO" -Color "Green"
 
 # Reset Culture settings back to original value
 [System.Threading.Thread]::CurrentThread.CurrentCulture = $OriginalCulture
